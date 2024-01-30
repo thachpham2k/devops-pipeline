@@ -1,0 +1,126 @@
+---
+- name: Install Docker and Docker-compose
+  hosts: gitlab
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Update package repositories
+      apt:
+        update_cache: yes
+      become: true
+
+    - name: Install required packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - curl
+        - ca-certificates
+        - apt-transport-https
+        - software-properties-common
+        - lsb-release
+      become: true
+
+    - name: Add Docker GPG key
+      shell: curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+      become: true
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+        state: present
+      become: true
+    
+    - name: Install Docker packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - docker-ce
+        - docker-ce-cli
+        - containerd.io
+      become: true
+
+    - name: Change permissions for docker.sock
+      file:
+        path: /var/run/docker.sock
+        mode: '0777'
+      become: true
+
+    - name: Install Docker Compose
+      shell: curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose
+      become: true
+
+    # - name: Install Docker
+    #   ansible.builtin.pip:
+    #     name: docker
+    #     state: latest
+
+    # - name: Install Docker
+    #   ansible.builtin.pip:
+    #     name: docker-compose
+    #     state: latest
+
+- name: Deploy GitLab with Docker Compose
+  hosts: gitlab
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Create folder
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0777'
+      loop: 
+        - /deploy
+        - /deploy/config
+        - /deploy/logs
+        - /deploy/data
+
+    - name: Copy SSL directory to the remote server
+      copy:
+        src: ../certs/ssl
+        dest: /deploy/config/
+      become: true
+
+    - name: Copy docker-compose.yml to the remote server
+      copy:
+        src: ./docker-compose.yml
+        dest: /deploy/docker-compose.yml
+        mode: '0644'
+      become: true
+
+    # - name: deploy gitlab using Docker Compose
+    #   docker_compose:
+    #     project_src: /deploy/
+    #     files:
+    #       - docker-compose.yml
+    #   environment: 
+    #     GITLAB_IP: "{{ GITLAB_IP }}"
+
+    - name: Run Docker Compose for docker-compose.yml
+      command: docker-compose up -d --build --force-recreate --remove-orphans
+      environment:
+        GITLAB_IP: "{{ GITLAB_IP }}"
+      args:
+        chdir: /deploy/
+        
+    - name: Wait for GitLab to start
+      wait_for:
+        host: "https://{{ GITLAB_IP }}"
+        state: started
+    
+    - name: Run docker exec command to grep initial root password
+      command: docker exec -it gitlab-ce grep 'Password:' /etc/gitlab/initial_root_password
+      register: grep_result
+
+    - name: Display the password
+      debug:
+        var: grep_result.stdout_lines
+    
+    - name: Save password to file
+      copy:
+        content: "{{ grep_result.stdout_lines }}"
+        dest: "/deploy/gitlab_password.txt"
